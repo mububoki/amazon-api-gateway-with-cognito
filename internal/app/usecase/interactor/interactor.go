@@ -27,6 +27,14 @@ func (i *Interactor) CreateAPIGatewayWithCognito() error {
 	return nil
 }
 
+func (i *Interactor) DeleteAPIGatewayWithCognito() error {
+	if err := i.deleteUserPool(); err != nil {
+		return xerrors.Errorf("failed to deleteUserPool: %w", err)
+	}
+
+	return nil
+}
+
 func (i *Interactor) createUserPool() error {
 	sess := session.Must(session.NewSessionWithOptions(session.Options{
 		SharedConfigState: session.SharedConfigEnable,
@@ -43,6 +51,18 @@ func (i *Interactor) createUserPool() error {
 	return nil
 }
 
+func (i *Interactor) deleteUserPool() error {
+	sess := session.Must(session.NewSessionWithOptions(session.Options{
+		SharedConfigState: session.SharedConfigEnable,
+	}))
+
+	if err := i.deleteIAMRole(sess); err != nil {
+		return xerrors.Errorf("failed to createIAMRole: %w", err)
+	}
+
+	return nil
+}
+
 func (i *Interactor) createIAMRole(sess *session.Session) (string, string, error) {
 	iamSvc := iam.New(sess)
 	doc := "{ \"Version\": \"2012-10-17\", \"Statement\": [ { \"Sid\": \"\", \"Effect\": \"Allow\", \"Principal\": { \"Service\": \"cognito-idp.amazonaws.com\" }, \"Action\": \"sts:AssumeRole\" } ] }"
@@ -52,7 +72,7 @@ func (i *Interactor) createIAMRole(sess *session.Session) (string, string, error
 		return "", "", xerrors.Errorf("failed to existRole: %w", err)
 	}
 	if len(roleARN) > 0 {
-		return roleARN, roleID, nil
+		return roleARN, roleID, xerrors.Errorf("there already exists role named %s", i.getRoleName())
 	}
 
 	res, err := iamSvc.CreateRole(
@@ -66,6 +86,16 @@ func (i *Interactor) createIAMRole(sess *session.Session) (string, string, error
 	}
 
 	return *res.Role.Arn, *res.Role.RoleId, nil
+}
+
+func (i *Interactor) deleteIAMRole(sess *session.Session) error {
+	iamSvc := iam.New(sess)
+
+	if _, err := iamSvc.DeleteRole(&iam.DeleteRoleInput{RoleName: aws.String(i.getRoleName())}); err != nil {
+		return xerrors.Errorf("failed to DeleteRole: %w", err)
+	}
+
+	return nil
 }
 
 func (i *Interactor) getRoleName() string {
