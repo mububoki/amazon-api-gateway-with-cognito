@@ -7,8 +7,37 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/cognitoidentityprovider"
 	"github.com/aws/aws-sdk-go/service/iam"
 	"golang.org/x/xerrors"
+)
+
+const (
+	msg                 = "{username} {####}"
+	subject             = "test-mububoki"
+	verifyMSG           = "{####}"
+	authMSG             = verifyMSG
+	waitDays            = 1
+	externalID          = "31ae2116-0aed-630a-b641-9ca9b0a8c050"
+	assumeRolePolicyDoc = "{ \"Version\": \"2012-10-17\"," +
+		" \"Statement\": [ {" +
+		" \"Sid\": \"\"," +
+		" \"Effect\": \"Allow\"," +
+		" \"Principal\": { \"Service\": \"cognito-idp.amazonaws.com\" }," +
+		" \"Action\": \"sts:AssumeRole\"," +
+		" \"Condition\": {" +
+		" \"StringEquals\": {" +
+		" \"sts:ExternalId\": \"" + externalID + "\"" +
+		"}" +
+		"}" +
+		" } ] }"
+	policyDoc = "{\"Version\": \"2012-10-17\"," +
+		" \"Statement\": [{" +
+		" \"Effect\": \"Allow\"," +
+		" \"Action\": [\"sns:publish\"]," +
+		" \"Resource\": [\"*\"]" +
+		"}]" +
+		"}"
 )
 
 type Interactor struct {
@@ -20,7 +49,18 @@ func NewInteractor(poolName string) *Interactor {
 }
 
 func (i *Interactor) CreateAPIGatewayWithCognito() error {
-	if err := i.createUserPool(); err != nil {
+	sess := session.Must(session.NewSessionWithOptions(session.Options{
+		SharedConfigState: session.SharedConfigEnable,
+	}))
+
+	roleARN, roleID, err := i.createIAMRole(sess)
+	if err != nil {
+		return xerrors.Errorf("failed to createIAMRole: %w", err)
+	}
+	log.Println("roleARN: ", roleARN)
+	log.Println("roleID: ", roleID)
+
+	if err := i.createUserPool(sess, roleARN, roleID); err != nil {
 		return xerrors.Errorf("failed to createUserPool: %w", err)
 	}
 
@@ -35,18 +75,62 @@ func (i *Interactor) DeleteAPIGatewayWithCognito() error {
 	return nil
 }
 
-func (i *Interactor) createUserPool() error {
-	sess := session.Must(session.NewSessionWithOptions(session.Options{
-		SharedConfigState: session.SharedConfigEnable,
-	}))
+func (i *Interactor) createUserPool(sess *session.Session, roleARN string, roleID string) error {
+	cgSvc := cognitoidentityprovider.New(sess)
 
-	roleARN, roleID, err := i.createIAMRole(sess)
-	if err != nil {
-		return xerrors.Errorf("failed to createIAMRole: %w", err)
+	input := &cognitoidentityprovider.CreateUserPoolInput{
+		PoolName: aws.String(i.poolName),
+		AdminCreateUserConfig: &cognitoidentityprovider.AdminCreateUserConfigType{
+			AllowAdminCreateUserOnly: aws.Bool(false),
+			InviteMessageTemplate: &cognitoidentityprovider.MessageTemplateType{
+				EmailMessage: aws.String(msg),
+				EmailSubject: aws.String(subject),
+				SMSMessage:   aws.String(msg),
+			},
+			UnusedAccountValidityDays: aws.Int64(waitDays),
+		},
+		AutoVerifiedAttributes: []*string{
+			aws.String("email"),
+			aws.String("phone_number"),
+		},
+		EmailVerificationMessage: aws.String(verifyMSG),
+		EmailVerificationSubject: aws.String(subject),
+		Policies: &cognitoidentityprovider.UserPoolPolicyType{
+			PasswordPolicy: &cognitoidentityprovider.PasswordPolicyType{
+				MinimumLength:    aws.Int64(6),
+				RequireLowercase: aws.Bool(false),
+				RequireNumbers:   aws.Bool(false),
+				RequireSymbols:   aws.Bool(false),
+				RequireUppercase: aws.Bool(false),
+			},
+		},
+		Schema: []*cognitoidentityprovider.SchemaAttributeType{
+			{
+				AttributeDataType:      aws.String("String"),
+				DeveloperOnlyAttribute: aws.Bool(false),
+				Mutable:                aws.Bool(false),
+				Name:                   aws.String("user_name"),
+				Required:               aws.Bool(false),
+				StringAttributeConstraints: &cognitoidentityprovider.StringAttributeConstraintsType{
+					MaxLength: aws.String("64"),
+					MinLength: aws.String("3"),
+				},
+			},
+		},
+		SmsAuthenticationMessage: aws.String(authMSG),
+		SmsConfiguration: &cognitoidentityprovider.SmsConfigurationType{
+			SnsCallerArn: aws.String(roleARN),
+			ExternalId:   aws.String(externalID),
+		},
+		SmsVerificationMessage: aws.String(verifyMSG),
 	}
 
-	log.Println("roleARN: ", roleARN)
-	log.Println("roleID: ", roleID)
+	res, err := cgSvc.CreateUserPool(input)
+	if err != nil {
+		return xerrors.Errorf("failed to CreateUserPool: %w", err)
+	}
+
+	log.Println("res: ", res)
 
 	return nil
 }
@@ -65,7 +149,6 @@ func (i *Interactor) deleteUserPool() error {
 
 func (i *Interactor) createIAMRole(sess *session.Session) (string, string, error) {
 	iamSvc := iam.New(sess)
-	doc := "{ \"Version\": \"2012-10-17\", \"Statement\": [ { \"Sid\": \"\", \"Effect\": \"Allow\", \"Principal\": { \"Service\": \"cognito-idp.amazonaws.com\" }, \"Action\": \"sts:AssumeRole\" } ] }"
 
 	roleARN, roleID, err := i.getRole(sess)
 	if err != nil {
@@ -77,7 +160,7 @@ func (i *Interactor) createIAMRole(sess *session.Session) (string, string, error
 
 	res, err := iamSvc.CreateRole(
 		&iam.CreateRoleInput{
-			AssumeRolePolicyDocument: aws.String(doc),
+			AssumeRolePolicyDocument: aws.String(assumeRolePolicyDoc),
 			RoleName:                 aws.String(i.getRoleName()),
 			Path:                     aws.String("/service-role/"),
 		})
@@ -85,11 +168,26 @@ func (i *Interactor) createIAMRole(sess *session.Session) (string, string, error
 		return "", "", xerrors.Errorf("failed to CreateRole: %w", err)
 	}
 
+	if _, err := iamSvc.PutRolePolicy(&iam.PutRolePolicyInput{
+		PolicyDocument: aws.String(policyDoc),
+		PolicyName:     aws.String(i.getPolicyName()),
+		RoleName:       aws.String(i.getRoleName()),
+	}); err != nil {
+		return "", "", xerrors.Errorf("failed to PutRolePolicy: %w", err)
+	}
+
 	return *res.Role.Arn, *res.Role.RoleId, nil
 }
 
 func (i *Interactor) deleteIAMRole(sess *session.Session) error {
 	iamSvc := iam.New(sess)
+
+	if _, err := iamSvc.DeleteRolePolicy(&iam.DeleteRolePolicyInput{
+		PolicyName: aws.String(i.getPolicyName()),
+		RoleName:   aws.String(i.getRoleName()),
+	}); err != nil {
+		return xerrors.Errorf("failed to DeleteRolePolicy: %w", err)
+	}
 
 	if _, err := iamSvc.DeleteRole(&iam.DeleteRoleInput{RoleName: aws.String(i.getRoleName())}); err != nil {
 		return xerrors.Errorf("failed to DeleteRole: %w", err)
@@ -101,6 +199,11 @@ func (i *Interactor) deleteIAMRole(sess *session.Session) error {
 func (i *Interactor) getRoleName() string {
 	name := strings.Replace(i.poolName, "-", "", -1)
 	return name + "-SMS-Role"
+}
+
+func (i *Interactor) getPolicyName() string {
+	name := strings.Replace(i.poolName, "-", "", -1)
+	return name + "-SMS-Policy"
 }
 
 func (i *Interactor) getRole(sess *session.Session) (string, string, error) {
