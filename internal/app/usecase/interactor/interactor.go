@@ -69,7 +69,7 @@ func (i *Interactor) createIAMRole(sess *session.Session) (string, string, error
 
 	roleARN, roleID, err := i.getRole(sess)
 	if err != nil {
-		return "", "", xerrors.Errorf("failed to existRole: %w", err)
+		return "", "", xerrors.Errorf("failed to getRole: %w", err)
 	}
 	if len(roleARN) > 0 {
 		return roleARN, roleID, xerrors.Errorf("there already exists role named %s", i.getRoleName())
